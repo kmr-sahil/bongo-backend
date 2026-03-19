@@ -1,20 +1,10 @@
 const express = require("express");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const pool = require("../db");
 
 const router = express.Router();
-
-// Configure nodemailer (assuming Gmail, adjust as needed)
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
 
 // Helper function to generate OTP
 function generateOTP() {
@@ -52,19 +42,10 @@ router.post("/signup", async (req, res) => {
     );
 
     // Send OTP via email
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
+    await sendMail({
       to: email,
       subject: "Your OTP for Signup",
       text: `Your OTP is: ${otp}`,
-    };
-
-    transporter.sendMail(mailOptions, (error, info) => {
-      if (error) {
-        console.log(error);
-        return res.status(500).json({ message: "Error sending OTP" });
-      }
-      console.log("OTP sent: " + info.response);
     });
 
     res.status(201).json({ message: "User registered. Please verify OTP." });
@@ -180,19 +161,10 @@ router.post("/forgot-password", async (req, res) => {
     ]);
 
     // Send OTP
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
+    await sendMail({
       to: email,
-      subject: "Your OTP for Password Reset",
+      subject: "Your OTP for Signup",
       text: `Your OTP is: ${otp}`,
-    };
-
-    transporter.sendMail(mailOptions, (error, info) => {
-      if (error) {
-        console.log(error);
-        return res.status(500).json({ message: "Error sending OTP" });
-      }
-      console.log("OTP sent: " + info.response);
     });
 
     res.json({ message: "OTP sent to your email" });

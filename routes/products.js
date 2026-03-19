@@ -177,12 +177,11 @@ router.get("/search", async (req, res) => {
   }
 });
 
-// GET /products - List products with filters
 router.get("/products", async (req, res) => {
   const {
     category,
     q,
-    sort = "created_at",
+    sort = "newest",
     page = 1,
     per_page = 20,
   } = req.query;
@@ -213,7 +212,35 @@ router.get("/products", async (req, res) => {
       paramIndex++;
     }
 
-    // total count query
+    // 🧠 ORDER BY logic
+    let orderByClause = "p.created_at DESC"; // default
+
+    switch (sort) {
+      case "newest":
+        orderByClause = "p.created_at DESC";
+        break;
+
+      case "price-low":
+        orderByClause = "p.price ASC";
+        break;
+
+      case "price-high":
+        orderByClause = "p.price DESC";
+        break;
+
+      case "bestseller":
+        orderByClause = "p.is_bestseller DESC, p.created_at DESC";
+        break;
+
+      case "most-wishlisted":
+        orderByClause = "wishlist_count DESC NULLS LAST";
+        break;
+
+      default:
+        orderByClause = "p.created_at DESC";
+    }
+
+    // total count
     const countQuery = `
       SELECT COUNT(*) 
       FROM products p
@@ -225,22 +252,34 @@ router.get("/products", async (req, res) => {
     const totalItems = parseInt(totalResult.rows[0].count);
     const totalPages = Math.ceil(totalItems / perPage);
 
-    const validSorts = ["name", "price", "created_at", "updated_at"];
-    const sortField = validSorts.includes(sort) ? sort : "created_at";
-
+    // 🚀 MAIN QUERY (with wishlist support)
     const productQuery = `
       SELECT 
         p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock,
         p.weight, p.size_or_dimensions, p.keywords, p.is_bestseller, p.is_visible,
         p.created_at, p.updated_at,
         c.name as category_name, c.slug as category_slug,
+
+        COALESCE(w.wishlist_count, 0) as wishlist_count,
+
         array_agg(pi.image_url ORDER BY pi.sort_order) as images
+
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
       LEFT JOIN product_images pi ON p.id = pi.product_id
+
+      LEFT JOIN (
+        SELECT product_id, COUNT(*) as wishlist_count
+        FROM wishlists
+        GROUP BY product_id
+      ) w ON p.id = w.product_id
+
       ${whereConditions}
-      GROUP BY p.id, c.name, c.slug
-      ORDER BY p.${sortField} DESC
+
+      GROUP BY p.id, c.name, c.slug, w.wishlist_count
+
+      ORDER BY ${orderByClause}
+
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
 
@@ -255,6 +294,7 @@ router.get("/products", async (req, res) => {
       current_page: currentPage,
       per_page: perPage,
     });
+
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -391,15 +431,29 @@ router.put(
     }
 
     try {
+      // 🧠 STEP 1: Get old stock
+      const existingProduct = await pool.query(
+        "SELECT stock FROM products WHERE id = $1",
+        [id]
+      );
+
+      if (existingProduct.rows.length === 0) {
+        return res.status(404).json({ message: "Product not found" });
+      }
+
+      const oldStock = existingProduct.rows[0].stock;
+      const newStock = stock ?? 0;
+
+      // 🧾 STEP 2: Update product
       const updatedProduct = await pool.query(
         `
-      UPDATE products SET name = $1, slug = $2, description = $3, category_id = $4, price = $5,
-                          sale_price = $6, sku = $7, stock = $8, weight = $9, size_or_dimensions = $10,
-                          keywords = $11, is_bestseller = $12, is_visible = $13
-      WHERE id = $14
-      RETURNING id, name, slug, description, category_id, price, sale_price, sku, stock,
-                weight, size_or_dimensions, keywords, is_bestseller, is_visible, created_at, updated_at
-    `,
+        UPDATE products SET name = $1, slug = $2, description = $3, category_id = $4, price = $5,
+                            sale_price = $6, sku = $7, stock = $8, weight = $9, size_or_dimensions = $10,
+                            keywords = $11, is_bestseller = $12, is_visible = $13
+        WHERE id = $14
+        RETURNING id, name, slug, description, category_id, price, sale_price, sku, stock,
+                  weight, size_or_dimensions, keywords, is_bestseller, is_visible, created_at, updated_at
+      `,
         [
           name,
           slug,
@@ -408,21 +462,62 @@ router.put(
           price,
           sale_price || null,
           sku || null,
-          stock || 0,
+          newStock,
           weight || null,
           size_or_dimensions || null,
           keywords || [],
           is_bestseller || false,
           is_visible !== false,
           id,
-        ],
+        ]
       );
 
-      if (updatedProduct.rows.length === 0) {
-        return res.status(404).json({ message: "Product not found" });
+      const product = updatedProduct.rows[0];
+
+      // 🔔 STEP 3: Trigger notify ONLY if stock came back
+      if (oldStock === 0 && newStock > 0) {
+        // fetch users waiting
+        const notifyUsers = await pool.query(
+          `
+          SELECT pn.user_id, u.email, p.name
+          FROM product_notifications pn
+          JOIN users u ON u.id = pn.user_id
+          JOIN products p ON p.id = pn.product_id
+          WHERE pn.product_id = $1
+          AND pn.notified = FALSE
+        `,
+          [id]
+        );
+
+        const users = notifyUsers.rows;
+
+        // ⚡ fire-and-forget async email sending
+        (async () => {
+          try {
+            for (const user of users) {
+              await sendEmail(
+                user.email,
+                `🔥 ${user.name} is back in stock!`,
+                `Good news! The product "${user.name}" is available again. Grab it before it's gone!`
+              );
+            }
+
+            // mark as notified
+            await pool.query(
+              `
+              UPDATE product_notifications
+              SET notified = TRUE
+              WHERE product_id = $1
+            `,
+              [id]
+            );
+          } catch (err) {
+            console.error("Notify email error:", err);
+          }
+        })();
       }
 
-      res.json(updatedProduct.rows[0]);
+      res.json(product);
     } catch (error) {
       if (error.code === "23505") {
         res.status(400).json({ message: "Product slug or SKU already exists" });
@@ -433,7 +528,7 @@ router.put(
         res.status(500).json({ message: "Server error" });
       }
     }
-  },
+  }
 );
 
 // DELETE /products/:id - Delete product (admin only)
@@ -699,6 +794,57 @@ router.post(
       res.status(500).json({ message: "Failed to upload image" });
     }
   },
+);
+
+router.post(
+  "/notify-me",
+  authenticateToken,
+  async (req, res) => {
+    const userId = req.user.id; // from JWT
+    const { product_id } = req.body;
+
+    if (!product_id) {
+      return res.status(400).json({ message: "Product ID is required" });
+    }
+
+    try {
+      // 🧠 Step 1: Check product exists
+      const productCheck = await pool.query(
+        "SELECT id, stock FROM products WHERE id = $1",
+        [product_id]
+      );
+
+      if (productCheck.rows.length === 0) {
+        return res.status(404).json({ message: "Product not found" });
+      }
+
+      const product = productCheck.rows[0];
+
+      // ⚠️ Optional UX: if already in stock, no need to notify
+      if (product.stock > 0) {
+        return res.status(400).json({
+          message: "Product is already in stock, no need to subscribe",
+        });
+      }
+
+      // 🧾 Step 2: Insert notify request (avoid duplicates)
+      await pool.query(
+        `
+        INSERT INTO product_notifications (user_id, product_id)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id, product_id) DO NOTHING
+        `,
+        [userId, product_id]
+      );
+
+      return res.json({
+        message: "You will be notified when the product is back in stock 🔔",
+      });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
 );
 
 module.exports = router;
