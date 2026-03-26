@@ -93,48 +93,68 @@ router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
-    return res.status(400).json({ message: "Email and password are required" });
+    return res.status(400).json({ 
+      message: "Email and password are required",
+      code: "MISSING_FIELDS"
+    });
   }
 
   try {
-    const user = await pool.query("SELECT * FROM users WHERE email = $1", [
-      email,
-    ]);
+    const user = await pool.query(
+      "SELECT * FROM users WHERE email = $1",
+      [email]
+    );
+
+    // 🚨 USER NOT FOUND
     if (user.rows.length === 0) {
-      return res.status(400).json({ message: "Invalid credentials" });
+      return res.status(404).json({ 
+        message: "User not registered",
+        code: "USER_NOT_FOUND"
+      });
     }
 
-    const { password_hash, full_name, phone, role } = user.rows[0];
+    const { password_hash, full_name, phone, role, id } = user.rows[0];
 
     const isMatch = await bcrypt.compare(password, password_hash);
+
+    // 🚨 WRONG PASSWORD
     if (!isMatch) {
-      return res.status(400).json({ message: "Invalid credentials" });
+      return res.status(401).json({ 
+        message: "Incorrect password",
+        code: "INVALID_PASSWORD"
+      });
     }
 
-    // Generate JWT
+    // ✅ SUCCESS
     const token = jwt.sign(
-      { id: user.rows[0].id, email },
+      { id, email },
       process.env.JWT_SECRET,
-      { expiresIn: "10d" },
+      { expiresIn: "10d" }
     );
 
     res.cookie("token", token, {
       httpOnly: true,
-      secure: false, // true in production (HTTPS)
+      secure: false,
       sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
     res.json({
       message: "Login successful",
-      token: token,
+      token,
       user: { name: full_name, role, email, phone },
     });
+
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ 
+      message: "Server error",
+      code: "SERVER_ERROR"
+    });
   }
 });
+
+
 
 // Forgot password
 router.post("/forgot-password", async (req, res) => {

@@ -185,6 +185,8 @@ router.get("/products", async (req, res) => {
     sort = "newest",
     page = 1,
     per_page = 20,
+    min_price,
+    max_price,
   } = req.query;
 
   const currentPage = parseInt(page);
@@ -197,10 +199,17 @@ router.get("/products", async (req, res) => {
 
     let whereConditions = `WHERE p.is_visible = true`;
 
+    let categories = [];
+
     if (category) {
-      whereConditions += ` AND c.slug = $${paramIndex}`;
-      params.push(category);
-      paramIndex++;
+      categories = category.split(","); // ["books-magazines", "childrens-books-early-learning", ...]
+      console.log("Filtering by categories:", categories);
+    }
+
+    if (categories.length > 0) {
+      const placeholders = categories.map(() => `$${paramIndex++}`).join(", ");
+      whereConditions += ` AND c.slug IN (${placeholders})`;
+      params.push(...categories);
     }
 
     if (q) {
@@ -210,6 +219,21 @@ router.get("/products", async (req, res) => {
         OR $${paramIndex} = ANY(p.keywords)
       )`;
       params.push(`%${q}%`);
+      paramIndex++;
+    }
+
+    // 💰 Price filtering
+    if (min_price && max_price) {
+      whereConditions += ` AND p.sale_price BETWEEN $${paramIndex} AND $${paramIndex + 1}`;
+      params.push(min_price, max_price);
+      paramIndex += 2;
+    } else if (min_price) {
+      whereConditions += ` AND p.sale_price >= $${paramIndex}`;
+      params.push(min_price);
+      paramIndex++;
+    } else if (max_price) {
+      whereConditions += ` AND p.sale_price <= $${paramIndex}`;
+      params.push(max_price);
       paramIndex++;
     }
 
@@ -256,7 +280,7 @@ router.get("/products", async (req, res) => {
     // 🚀 MAIN QUERY (with wishlist support)
     const productQuery = `
       SELECT 
-        p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock,
+        p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock, p.stock_status,
         p.weight, p.size_or_dimensions, p.keywords, p.is_bestseller, p.is_visible,
         p.created_at, p.updated_at,
         c.name as category_name, c.slug as category_slug,
@@ -295,7 +319,6 @@ router.get("/products", async (req, res) => {
       current_page: currentPage,
       per_page: perPage,
     });
-
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -309,7 +332,7 @@ router.get("/products/:id", async (req, res) => {
   try {
     const product = await pool.query(
       `
-      SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock,
+      SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock, p.stock_status,
              p.weight, p.size_or_dimensions, p.keywords, p.is_bestseller, p.is_visible,
              p.created_at, p.updated_at,
              c.name as category_name, c.slug as category_slug
@@ -355,6 +378,7 @@ router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
     keywords,
     is_bestseller,
     is_visible,
+    stock_status,
   } = req.body;
 
   if (!name || !slug || !description || !category_id || !price) {
@@ -367,10 +391,10 @@ router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
     const newProduct = await pool.query(
       `
       INSERT INTO products (name, slug, description, category_id, price, sale_price, sku, stock,
-                           weight, size_or_dimensions, keywords, is_bestseller, is_visible)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                           weight, size_or_dimensions, keywords, is_bestseller, is_visible, stock_status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       RETURNING id, name, slug, description, category_id, price, sale_price, sku, stock,
-                weight, size_or_dimensions, keywords, is_bestseller, is_visible, created_at, updated_at
+                weight, size_or_dimensions, keywords, is_bestseller, is_visible, stock_status, created_at, updated_at
     `,
       [
         name,
@@ -386,6 +410,7 @@ router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
         keywords || [],
         is_bestseller || false,
         is_visible !== false,
+        stock_status || "upcoming",
       ],
     );
 
@@ -423,6 +448,7 @@ router.put(
       keywords,
       is_bestseller,
       is_visible,
+      stock_status,
     } = req.body;
 
     if (!name || !slug || !description || !category_id || !price) {
@@ -435,7 +461,7 @@ router.put(
       // 🧠 STEP 1: Get old stock
       const existingProduct = await pool.query(
         "SELECT stock FROM products WHERE id = $1",
-        [id]
+        [id],
       );
 
       if (existingProduct.rows.length === 0) {
@@ -450,10 +476,10 @@ router.put(
         `
         UPDATE products SET name = $1, slug = $2, description = $3, category_id = $4, price = $5,
                             sale_price = $6, sku = $7, stock = $8, weight = $9, size_or_dimensions = $10,
-                            keywords = $11, is_bestseller = $12, is_visible = $13
-        WHERE id = $14
+                            keywords = $11, is_bestseller = $12, is_visible = $13, stock_status = $14
+        WHERE id = $15
         RETURNING id, name, slug, description, category_id, price, sale_price, sku, stock,
-                  weight, size_or_dimensions, keywords, is_bestseller, is_visible, created_at, updated_at
+                  weight, size_or_dimensions, keywords, is_bestseller, is_visible, stock_status, created_at, updated_at
       `,
         [
           name,
@@ -469,8 +495,9 @@ router.put(
           keywords || [],
           is_bestseller || false,
           is_visible !== false,
+          stock_status || "upcoming",
           id,
-        ]
+        ],
       );
 
       const product = updatedProduct.rows[0];
@@ -487,7 +514,7 @@ router.put(
           WHERE pn.product_id = $1
           AND pn.notified = FALSE
         `,
-          [id]
+          [id],
         );
 
         const users = notifyUsers.rows;
@@ -499,7 +526,7 @@ router.put(
               await sendMail({
                 to: user.email,
                 subject: `🔥 ${user.name} is back in stock!`,
-                text: `Good news! The product "${user.name}" is available again. Grab it before it's gone!`
+                text: `Good news! The product "${user.name}" is available again. Grab it before it's gone!`,
               });
             }
 
@@ -510,7 +537,7 @@ router.put(
               SET notified = TRUE
               WHERE product_id = $1
             `,
-              [id]
+              [id],
             );
           } catch (err) {
             console.error("Notify email error:", err);
@@ -529,7 +556,7 @@ router.put(
         res.status(500).json({ message: "Server error" });
       }
     }
-  }
+  },
 );
 
 // DELETE /products/:id - Delete product (admin only)
@@ -797,55 +824,51 @@ router.post(
   },
 );
 
-router.post(
-  "/notify-me",
-  authenticateToken,
-  async (req, res) => {
-    const userId = req.user.id; // from JWT
-    const { product_id } = req.body;
+router.post("/notify-me", authenticateToken, async (req, res) => {
+  const userId = req.user.id; // from JWT
+  const { product_id } = req.body;
 
-    if (!product_id) {
-      return res.status(400).json({ message: "Product ID is required" });
+  if (!product_id) {
+    return res.status(400).json({ message: "Product ID is required" });
+  }
+
+  try {
+    // 🧠 Step 1: Check product exists
+    const productCheck = await pool.query(
+      "SELECT id, stock FROM products WHERE id = $1",
+      [product_id],
+    );
+
+    if (productCheck.rows.length === 0) {
+      return res.status(404).json({ message: "Product not found" });
     }
 
-    try {
-      // 🧠 Step 1: Check product exists
-      const productCheck = await pool.query(
-        "SELECT id, stock FROM products WHERE id = $1",
-        [product_id]
-      );
+    const product = productCheck.rows[0];
 
-      if (productCheck.rows.length === 0) {
-        return res.status(404).json({ message: "Product not found" });
-      }
+    // ⚠️ Optional UX: if already in stock, no need to notify
+    if (product.stock > 0) {
+      return res.status(400).json({
+        message: "Product is already in stock, no need to subscribe",
+      });
+    }
 
-      const product = productCheck.rows[0];
-
-      // ⚠️ Optional UX: if already in stock, no need to notify
-      if (product.stock > 0) {
-        return res.status(400).json({
-          message: "Product is already in stock, no need to subscribe",
-        });
-      }
-
-      // 🧾 Step 2: Insert notify request (avoid duplicates)
-      await pool.query(
-        `
+    // 🧾 Step 2: Insert notify request (avoid duplicates)
+    await pool.query(
+      `
         INSERT INTO product_notifications (user_id, product_id)
         VALUES ($1, $2)
         ON CONFLICT (user_id, product_id) DO NOTHING
         `,
-        [userId, product_id]
-      );
+      [userId, product_id],
+    );
 
-      return res.json({
-        message: "You will be notified when the product is back in stock 🔔",
-      });
-    } catch (error) {
-      console.error(error);
-      return res.status(500).json({ message: "Server error" });
-    }
+    return res.json({
+      message: "You will be notified when the product is back in stock 🔔",
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Server error" });
   }
-);
+});
 
 module.exports = router;

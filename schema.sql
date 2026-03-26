@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS products (
   keywords TEXT[] DEFAULT '{}',
   is_bestseller BOOLEAN NOT NULL DEFAULT FALSE,
   is_visible BOOLEAN NOT NULL DEFAULT TRUE,
+  stock_status TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
