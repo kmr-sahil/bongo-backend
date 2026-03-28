@@ -17,6 +17,7 @@ const productsRouter = require("./routes/products");
 const ordersRouter = require("./routes/cart");
 const adminRouter = require("./routes/admin");
 const blogsRouter = require("./routes/blogs");
+const extras = require("./routes/extras");
 
 app.use("/auth", authRouter);
 app.use("/profile", profileRouter);
@@ -24,6 +25,7 @@ app.use("/products", productsRouter);
 app.use("/store", ordersRouter);
 app.use("/store/admin", adminRouter);
 app.use("/blogs", blogsRouter);
+app.use("/extras", extras);
 
 app.get("/", (req, res) => {
   res.send("Server is running");
