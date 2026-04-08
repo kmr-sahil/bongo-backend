@@ -20,6 +20,7 @@ const adminRouter = require("./routes/admin");
 const blogsRouter = require("./routes/blogs");
 const extras = require("./routes/extras");
 const checkoutRouter = require("./routes/checkout");
+require("./Schedulers/abadonCardScheduler");
 
 app.use("/api/auth", authRouter);
 app.use("/profile", profileRouter);

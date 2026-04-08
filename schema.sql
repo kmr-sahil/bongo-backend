@@ -299,7 +299,7 @@ CREATE TABLE newsletters (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS cart_items (
+CREATE TABLE IF NOT EXISTS cart (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
@@ -309,3 +309,22 @@ CREATE TABLE IF NOT EXISTS cart_items (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_cart_user_id ON cart(user_id);
+CREATE INDEX IF NOT EXISTS idx_cart_updated_at ON cart(updated_at);
+
+CREATE TABLE IF NOT EXISTS cart_abandon_reminders (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  last_cart_activity_at TIMESTAMPTZ NOT NULL,
+  last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cart_abandon_reminders_last_sent_at ON cart_abandon_reminders(last_sent_at);
+
+DROP TRIGGER IF EXISTS update_cart_abandon_reminders_updated_at ON cart_abandon_reminders;
+CREATE TRIGGER update_cart_abandon_reminders_updated_at
+BEFORE UPDATE ON cart_abandon_reminders
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
