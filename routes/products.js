@@ -9,6 +9,11 @@ const sendMail = require("../helpers/sendMail");
 
 const router = express.Router();
 
+const normalizeStockStatus = (stock, stockStatus) => {
+  if (Number(stock) > 0) return "in-stock";
+  return stockStatus === "upcoming" ? "upcoming" : "out-of-stock";
+};
+
 // Middleware to check admin role
 const requireAdmin = async (req, res, next) => {
   const role = await getRole(req.user.id);
@@ -172,7 +177,12 @@ router.get("/products", async (req, res) => {
     // 🚀 MAIN QUERY (with wishlist support)
     const productQuery = `
       SELECT 
-        p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock, p.stock_status,
+        p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock,
+        CASE
+          WHEN COALESCE(p.stock, 0) > 0 THEN 'in-stock'
+          WHEN p.stock_status = 'upcoming' THEN 'upcoming'
+          ELSE 'out-of-stock'
+        END AS stock_status,
         p.weight, p.size_or_dimensions, p.keywords, p.is_bestseller, p.is_visible,
         p.created_at, p.updated_at,
         c.name as category_name, c.slug as category_slug,
@@ -224,7 +234,12 @@ router.get("/products/:id", async (req, res) => {
   try {
     const product = await pool.query(
       `
-      SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock, p.stock_status,
+      SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock,
+             CASE
+               WHEN COALESCE(p.stock, 0) > 0 THEN 'in-stock'
+               WHEN p.stock_status = 'upcoming' THEN 'upcoming'
+               ELSE 'out-of-stock'
+             END AS stock_status,
              p.weight, p.size_or_dimensions, p.keywords, p.is_bestseller, p.is_visible,
              p.created_at, p.updated_at,
              c.name as category_name, c.slug as category_slug
@@ -280,6 +295,12 @@ router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
   }
 
   try {
+    const normalizedStock = Number(stock) || 0;
+    const normalizedStockStatus = normalizeStockStatus(
+      normalizedStock,
+      stock_status,
+    );
+
     const newProduct = await pool.query(
       `
       INSERT INTO products (name, slug, description, category_id, price, sale_price, sku, stock,
@@ -296,13 +317,13 @@ router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
         price,
         sale_price || null,
         sku || null,
-        stock || 0,
+        normalizedStock,
         weight || null,
         size_or_dimensions || null,
         keywords || [],
         is_bestseller || false,
         is_visible !== false,
-        stock_status || "upcoming",
+        normalizedStockStatus,
       ],
     );
 
@@ -361,7 +382,8 @@ router.put(
       }
 
       const oldStock = existingProduct.rows[0].stock;
-      const newStock = stock ?? 0;
+      const newStock = Number(stock) || 0;
+      const normalizedStockStatus = normalizeStockStatus(newStock, stock_status);
 
       // 🧾 STEP 2: Update product
       const updatedProduct = await pool.query(
@@ -387,7 +409,7 @@ router.put(
           keywords || [],
           is_bestseller || false,
           is_visible !== false,
-          stock_status || "upcoming",
+          normalizedStockStatus,
           id,
         ],
       );
@@ -460,16 +482,41 @@ router.delete(
     const { id } = req.params;
 
     try {
-      const result = await pool.query(
-        "DELETE FROM products WHERE id = $1 RETURNING id",
+      const productExists = await pool.query(
+        "SELECT id FROM products WHERE id = $1",
         [id],
       );
 
-      if (result.rows.length === 0) {
+      if (productExists.rows.length === 0) {
         return res.status(404).json({ message: "Product not found" });
       }
 
-      res.json({ message: "Product deleted successfully" });
+      const orderReference = await pool.query(
+        "SELECT 1 FROM order_items WHERE product_id = $1 LIMIT 1",
+        [id],
+      );
+
+      if (orderReference.rows.length > 0) {
+        await pool.query(
+          `UPDATE products
+           SET is_visible = FALSE,
+               stock = 0,
+               stock_status = 'out-of-stock',
+               updated_at = NOW()
+           WHERE id = $1`,
+          [id],
+        );
+
+        return res.json({
+          message:
+            "Product has order history, so it was archived instead of deleted",
+          archived: true,
+        });
+      }
+
+      await pool.query("DELETE FROM products WHERE id = $1", [id]);
+
+      return res.json({ message: "Product deleted successfully", archived: false });
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
@@ -513,6 +560,11 @@ router.get("/id/:id", async (req, res) => {
         p.sale_price,
         p.sku,
         p.stock,
+        CASE
+          WHEN COALESCE(p.stock, 0) > 0 THEN 'in-stock'
+          WHEN p.stock_status = 'upcoming' THEN 'upcoming'
+          ELSE 'out-of-stock'
+        END AS stock_status,
         p.weight,
         p.size_or_dimensions,
         p.keywords,

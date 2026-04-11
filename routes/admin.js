@@ -24,8 +24,8 @@ router.get("/dashboard", authenticateAdmin, async (req, res) => {
          AND date_trunc('month', created_at)=date_trunc('month', CURRENT_DATE)
         ) AS revenue_this_month,
 
-        (SELECT COUNT(*) FROM products) AS total_products,
-        (SELECT COUNT(*) FROM products WHERE stock = 0) AS out_of_stock
+        (SELECT COUNT(*) FROM products WHERE is_visible = TRUE) AS total_products,
+        (SELECT COUNT(*) FROM products WHERE is_visible = TRUE AND COALESCE(stock, 0) = 0) AS out_of_stock
     `);
 
     res.json(stats.rows[0]);
@@ -432,5 +432,47 @@ router.put("/orders/:id", authenticateAdmin, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// Get all payment methods
+router.get("/payment-methods", authenticateAdmin, async(req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM available_payment_method ORDER BY id`
+    );
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error fetching payment methods:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// toggles payment method availability(mainly for cod)
+router.post("/payment/toggle", authenticateAdmin, async(req, res) => {
+  const { payment_method, is_available } = req.body;
+  
+  // Validate required fields
+  if (!payment_method || typeof is_available !== 'boolean') {
+    return res.status(400).json({ message: "payment_method and is_available (boolean) are required" });
+  }
+  
+  try{
+    const result = await pool.query(
+      `UPDATE available_payment_method SET is_available = $1, updated_at = CURRENT_TIMESTAMP WHERE payment_method = $2 RETURNING *`,
+      [is_available, payment_method]
+    );
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Payment method not found" });
+    }
+
+    res.status(200).json({ 
+      message: "Payment method updated successfully",
+      payment_method: result.rows[0]
+    });
+  }catch(error){
+    console.error("Error updating payment method:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+})
 
 module.exports = router;
