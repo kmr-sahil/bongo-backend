@@ -24,8 +24,8 @@ router.get("/dashboard", authenticateAdmin, async (req, res) => {
          AND date_trunc('month', created_at)=date_trunc('month', CURRENT_DATE)
         ) AS revenue_this_month,
 
-        (SELECT COUNT(*) FROM products) AS total_products,
-        (SELECT COUNT(*) FROM products WHERE stock = 0) AS out_of_stock
+        (SELECT COUNT(*) FROM products WHERE is_visible = TRUE) AS total_products,
+        (SELECT COUNT(*) FROM products WHERE is_visible = TRUE AND COALESCE(stock, 0) = 0) AS out_of_stock
     `);
 
     res.json(stats.rows[0]);

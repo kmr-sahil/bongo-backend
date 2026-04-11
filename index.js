@@ -21,6 +21,7 @@ const blogsRouter = require("./routes/blogs");
 const extras = require("./routes/extras");
 const checkoutRouter = require("./routes/checkout");
 require("./Schedulers/abadonCardScheduler");
+require("./Schedulers/pendingPhonePeOrderScheduler");
 
 app.use("/api/auth", authRouter);
 app.use("/profile", profileRouter);

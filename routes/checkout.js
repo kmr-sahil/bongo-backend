@@ -173,8 +173,61 @@ function buildDeliveryOptions(rawCourierList, { isCod = false } = {}) {
 }
 
 async function updateOrderPaymentState(orderId, paymentStatus) {
-  const result = await pool.query(
-    `
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const existingOrderResult = await client.query(
+      "SELECT id, user_id, payment_status FROM orders WHERE id = $1 FOR UPDATE",
+      [orderId],
+    );
+
+    if (existingOrderResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const existingOrder = existingOrderResult.rows[0];
+    const currentPaymentStatus = existingOrder.payment_status;
+    const nextPaymentStatus =
+      (currentPaymentStatus === "paid" || currentPaymentStatus === "failed") &&
+      paymentStatus === "pending"
+        ? currentPaymentStatus
+        : paymentStatus;
+    const isTransitionToPaid =
+      nextPaymentStatus === "paid" && currentPaymentStatus !== "paid";
+
+    if (isTransitionToPaid) {
+      const orderItemsResult = await client.query(
+        "SELECT product_id, quantity FROM order_items WHERE order_id = $1",
+        [orderId],
+      );
+
+      for (const orderItem of orderItemsResult.rows) {
+        const stockUpdateResult = await client.query(
+          `UPDATE products
+           SET stock = stock - $1
+           WHERE id = $2 AND stock >= $1
+           RETURNING id`,
+          [orderItem.quantity, orderItem.product_id],
+        );
+
+        if (stockUpdateResult.rows.length === 0) {
+          throw new Error(
+            `Insufficient stock for product ${orderItem.product_id} at payment confirmation`,
+          );
+        }
+
+        await client.query(
+          "DELETE FROM cart WHERE user_id = $1 AND product_id = $2",
+          [existingOrder.user_id, orderItem.product_id],
+        );
+      }
+    }
+
+    const result = await client.query(
+      `
 		UPDATE orders
 		SET
 			payment_status = $1::payment_status,
@@ -186,10 +239,22 @@ async function updateOrderPaymentState(orderId, paymentStatus) {
 		WHERE id = $2
 		RETURNING id, status, payment_status
 		`,
-    [paymentStatus, orderId],
-  );
+    [nextPaymentStatus, orderId],
+    );
 
-  return result.rows[0] || null;
+    await client.query("COMMIT");
+    return result.rows[0] || null;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      // Rollback failed, continue with error handling.
+    }
+
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function genrateNewApiKeyShiprocket() {
@@ -430,6 +495,73 @@ router.get("/payment-methods", async (req, res) => {
   }
 });
 
+// GET /checkout/product-delivery-check?pincode=700001&product_id=<uuid>&quantity=1&cod=0
+router.get("/product-delivery-check", async (req, res) => {
+  const { pincode, product_id, quantity = 1, cod = 0 } = req.query;
+
+  const deliveryPincode = String(pincode || "").trim();
+  const productId = String(product_id || "").trim();
+  const qty = Number.parseInt(String(quantity), 10);
+  const isCod = String(cod) === "1";
+
+  if (!/^\d{6}$/.test(deliveryPincode)) {
+    return res.status(400).json({ message: "Valid 6-digit pincode is required" });
+  }
+
+  if (!productId) {
+    return res.status(400).json({ message: "product_id is required" });
+  }
+
+  if (!Number.isInteger(qty) || qty < 1) {
+    return res.status(400).json({ message: "Valid quantity is required" });
+  }
+
+  try {
+    const productResult = await pool.query(
+      "SELECT id, name, stock FROM products WHERE id = $1 AND is_visible = TRUE",
+      [productId],
+    );
+
+    if (productResult.rows.length === 0) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const product = productResult.rows[0];
+
+    if (Number(product.stock) < qty) {
+      return res.status(200).json({
+        delivery_available: false,
+        delivery_time_days: 0,
+        message: "Product is out of stock",
+      });
+    }
+
+    const deliveryData = await getDeliveryOptionsForOrder({
+      items: [{ product_id: productId, quantity: qty }],
+      deliveryPincode,
+      isCod,
+    });
+
+    const firstOption = deliveryData.options[0] || null;
+    const days = Number(firstOption?.estimated_delivery_days ?? 0);
+
+    return res.status(200).json({
+      delivery_available: deliveryData.options.length > 0,
+      delivery_time_days: Number.isFinite(days) && days > 0 ? days : 0,
+      options: deliveryData.options,
+      selected_default_code: firstOption?.code || null,
+      pincode: deliveryPincode,
+    });
+  } catch (error) {
+    console.error("[Checkout] Product delivery check error:", error);
+    return res.status(500).json({
+      delivery_available: false,
+      delivery_time_days: 0,
+      message: error.message || "Could not check delivery",
+    });
+  }
+});
+
 // POST /checkout/delivery-options
 // Body: { address_id, items: [{ product_id, quantity }], payment_gateway?: "phonepe" | "cash_on_delivery" }
 router.post("/delivery-options", authenticateToken, async (req, res) => {
@@ -612,15 +744,17 @@ router.post("/initiate", authenticateToken, async (req, res) => {
         ],
       );
 
-      await client.query(
-        "UPDATE products SET stock = stock - $1 WHERE id = $2",
-        [item.quantity, item.productId],
-      );
+      if (isCOD) {
+        await client.query(
+          "UPDATE products SET stock = stock - $1 WHERE id = $2",
+          [item.quantity, item.productId],
+        );
 
-      await client.query(
-        "DELETE FROM cart WHERE user_id = $1 AND product_id = $2",
-        [req.user.id, item.productId],
-      );
+        await client.query(
+          "DELETE FROM cart WHERE user_id = $1 AND product_id = $2",
+          [req.user.id, item.productId],
+        );
+      }
     }
 
     await client.query("COMMIT");

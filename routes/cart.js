@@ -23,6 +23,7 @@ router.get("/wishlist", authenticateToken, async (req, res) => {
       `
       SELECT 
         w.id,
+        w.product_id,
         w.created_at,
 
         json_build_object(
@@ -105,6 +106,14 @@ router.post("/wishlist", authenticateToken, async (req, res) => {
 // DELETE /wishlist/:productId - Remove product from wishlist
 router.delete("/wishlist/:productId", authenticateToken, async (req, res) => {
   const { productId } = req.params;
+
+  if (!productId || productId === "undefined") {
+    return res.status(400).json({ message: "Product ID is required" });
+  }
+
+  if (!/^[0-9a-fA-F-]{36}$/.test(productId)) {
+    return res.status(400).json({ message: "Invalid Product ID" });
+  }
 
   try {
     const result = await pool.query(

@@ -9,6 +9,11 @@ const sendMail = require("../helpers/sendMail");
 
 const router = express.Router();
 
+const normalizeStockStatus = (stock, stockStatus) => {
+  if (Number(stock) > 0) return "in-stock";
+  return stockStatus === "upcoming" ? "upcoming" : "out-of-stock";
+};
+
 // Middleware to check admin role
 const requireAdmin = async (req, res, next) => {
   const role = await getRole(req.user.id);
@@ -172,7 +177,12 @@ router.get("/products", async (req, res) => {
     // 🚀 MAIN QUERY (with wishlist support)
     const productQuery = `
       SELECT 
-        p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock, p.stock_status,
+        p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock,
+        CASE
+          WHEN COALESCE(p.stock, 0) > 0 THEN 'in-stock'
+          WHEN p.stock_status = 'upcoming' THEN 'upcoming'
+          ELSE 'out-of-stock'
+        END AS stock_status,
         p.weight, p.size_or_dimensions, p.keywords, p.is_bestseller, p.is_visible,
         p.created_at, p.updated_at,
         c.name as category_name, c.slug as category_slug,
@@ -224,7 +234,12 @@ router.get("/products/:id", async (req, res) => {
   try {
     const product = await pool.query(
       `
-      SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock, p.stock_status,
+      SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price, p.sku, p.stock,
+             CASE
+               WHEN COALESCE(p.stock, 0) > 0 THEN 'in-stock'
+               WHEN p.stock_status = 'upcoming' THEN 'upcoming'
+               ELSE 'out-of-stock'
+             END AS stock_status,
              p.weight, p.size_or_dimensions, p.keywords, p.is_bestseller, p.is_visible,
              p.created_at, p.updated_at,
              c.name as category_name, c.slug as category_slug
@@ -280,6 +295,12 @@ router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
   }
 
   try {
+    const normalizedStock = Number(stock) || 0;
+    const normalizedStockStatus = normalizeStockStatus(
+      normalizedStock,
+      stock_status,
+    );
+
     const newProduct = await pool.query(
       `
       INSERT INTO products (name, slug, description, category_id, price, sale_price, sku, stock,
@@ -296,13 +317,13 @@ router.post("/products", authenticateToken, requireAdmin, async (req, res) => {
         price,
         sale_price || null,
         sku || null,
-        stock || 0,
+        normalizedStock,
         weight || null,
         size_or_dimensions || null,
         keywords || [],
         is_bestseller || false,
         is_visible !== false,
-        stock_status || "upcoming",
+        normalizedStockStatus,
       ],
     );
 
@@ -361,7 +382,8 @@ router.put(
       }
 
       const oldStock = existingProduct.rows[0].stock;
-      const newStock = stock ?? 0;
+      const newStock = Number(stock) || 0;
+      const normalizedStockStatus = normalizeStockStatus(newStock, stock_status);
 
       // 🧾 STEP 2: Update product
       const updatedProduct = await pool.query(
@@ -387,7 +409,7 @@ router.put(
           keywords || [],
           is_bestseller || false,
           is_visible !== false,
-          stock_status || "upcoming",
+          normalizedStockStatus,
           id,
         ],
       );
@@ -479,7 +501,7 @@ router.delete(
           `UPDATE products
            SET is_visible = FALSE,
                stock = 0,
-               stock_status = 'out_of_stock',
+               stock_status = 'out-of-stock',
                updated_at = NOW()
            WHERE id = $1`,
           [id],
@@ -538,6 +560,11 @@ router.get("/id/:id", async (req, res) => {
         p.sale_price,
         p.sku,
         p.stock,
+        CASE
+          WHEN COALESCE(p.stock, 0) > 0 THEN 'in-stock'
+          WHEN p.stock_status = 'upcoming' THEN 'upcoming'
+          ELSE 'out-of-stock'
+        END AS stock_status,
         p.weight,
         p.size_or_dimensions,
         p.keywords,
