@@ -31,7 +31,6 @@ async function sendMail({ to, subject, text, html }) {
       html,
     });
 
-    console.log("📨 Mail sent:", info.response);
     return true;
   } catch (error) {
     console.error("❌ Mail error:", error);

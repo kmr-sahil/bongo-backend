@@ -194,13 +194,6 @@ router.post("/manual-order", async (req, res) => {
   try {
     const { user_id, email, address, items } = req.body;
 
-    console.log("Received manual order request:", {
-      user_id,
-      email,
-      address,
-      items,
-    });
-
     // 🔒 Basic validation
     if (!items || items.length === 0) {
       return res.status(400).json({ message: "No items provided" });

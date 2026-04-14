@@ -33,9 +33,7 @@ const PendingPhonePeOrderScheduler = new CronJob(
     try {
       const expiredCount = await expireStalePendingPhonePeOrders();
       if (expiredCount > 0) {
-        console.log(
-          `[PhonePe Pending Scheduler] Expired ${expiredCount} stale pending order(s)`,
-        );
+       
       }
     } catch (error) {
       console.error("[PhonePe Pending Scheduler] Failed to expire pending orders", error);

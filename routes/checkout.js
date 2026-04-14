@@ -5,6 +5,10 @@ const {
   initiatePhonePePayment,
   getPhonePeStatus,
 } = require("../helpers/phonepe");
+const {
+  isTestModeEnabled,
+  mockShiprocketApiCall,
+} = require("../helpers/shiprocketTestMode");
 
 const router = express.Router();
 
@@ -483,6 +487,246 @@ async function getDeliveryOptionsForOrder({ items, deliveryPincode, isCod }) {
   };
 }
 
+async function syncOrderToShiprocket({
+  orderId,
+  userId,
+  addressId,
+  items,
+  totalAmount,
+  paymentMethod,
+  shippingCharge,
+  courierCompanyId,
+}) {
+  const client = await pool.connect();
+
+  try {
+    // Fetch order details
+    const orderResult = await pool.query(
+      "SELECT id, user_id, total_amount, payment_method FROM orders WHERE id = $1",
+      [orderId],
+    );
+
+    if (orderResult.rows.length === 0) {
+      throw new Error("Order not found");
+    }
+
+    // Fetch user details (for email)
+    const userResult = await pool.query(
+      "SELECT id, email FROM users WHERE id = $1",
+      [userId],
+    );
+
+    if (userResult.rows.length === 0) {
+      throw new Error("User not found");
+    }
+
+    const user = userResult.rows[0];
+
+    // Fetch full address details
+    const addressResult = await pool.query(
+      "SELECT id, name, phone, address_line1, address_line2, city, state, country, pincode FROM addresses WHERE id = $1 AND user_id = $2",
+      [addressId, userId],
+    );
+
+    if (addressResult.rows.length === 0) {
+      throw new Error("Address not found");
+    }
+
+    const address = addressResult.rows[0];
+
+    // Fetch order items with product details
+    const orderItemsResult = await pool.query(
+      `SELECT oi.product_id, oi.quantity, oi.price_snapshot, 
+              oi.product_name_snapshot, p.sku 
+       FROM order_items oi
+       JOIN products p ON oi.product_id = p.id
+       WHERE oi.order_id = $1`,
+      [orderId],
+    );
+
+    const orderItems = orderItemsResult.rows;
+
+    // Calculate subtotal (total - shipping)
+    const subtotal = totalAmount - shippingCharge;
+
+    // Map order items to Shiprocket format
+    const shiprocketItems = orderItems.map((item) => ({
+      name: item.product_name_snapshot,
+      sku: item.sku || `SKU-${item.product_id}`,
+      units: item.quantity,
+      selling_price: Number(item.price_snapshot),
+    }));
+
+    // Determine payment method for Shiprocket
+    const shiprocketPaymentMethod = paymentMethod === "cod" ? "COD" : "Prepaid";
+
+    let apiKey = null;
+    if (!isTestModeEnabled()) {
+      apiKey = await getShiprocketApiKey({ allowExpiredFallback: true });
+      if (!apiKey) {
+        throw new Error("Shiprocket API key unavailable");
+      }
+    }
+
+    // Prepare the address string
+    const addressLine = address.address_line2
+      ? `${address.address_line1}, ${address.address_line2}`
+      : address.address_line1;
+
+    // Prepare Shiprocket payload
+    const shiprocketPayload = {
+      order_id: orderId,
+      order_date: new Date().toISOString().split("T")[0],
+      pickup_location: process.env.SHIPROCKET_PICKUP_NAME || "Default Pickup",
+      channel_id: 0,
+      comment: "",
+      billing_customer_name: address.name,
+      billing_email: user.email,
+      billing_phone: address.phone,
+      billing_address: addressLine,
+      billing_city: address.city,
+      billing_state: address.state,
+      billing_country: address.country || "India",
+      billing_pincode: address.pincode,
+      shipping_customer_name: address.name,
+      shipping_email: user.email,
+      shipping_phone: address.phone,
+      shipping_address: addressLine,
+      shipping_city: address.city,
+      shipping_state: address.state,
+      shipping_country: address.country || "India",
+      shipping_pincode: address.pincode,
+      order_items: shiprocketItems,
+      payment_method: shiprocketPaymentMethod,
+      shipping_charges: Number(shippingCharge),
+      cod_amount: paymentMethod === "cod" ? Number(totalAmount) : 0,
+      sub_total: Number(subtotal),
+      ...(courierCompanyId && { courier_company_id: courierCompanyId }),
+    };
+
+    // Send request to Shiprocket (or use mock in test mode)
+    let response, data;
+
+    if (isTestModeEnabled()) {
+      response = await mockShiprocketApiCall(shiprocketPayload, orderId);
+      data = await response.json();
+    } else {
+      response = await fetch(
+        "https://apiv2.shiprocket.in/v1/external/orders/create/adhoc",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(shiprocketPayload),
+        },
+      );
+      data = await response.json();
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        `Shiprocket API error: ${data?.message || response.statusText}`,
+      );
+    }
+
+    const shiprocketOrderId = data?.data?.order_id || data?.order_id;
+    const shiprocketShipmentId =
+      data?.data?.shipment_id || data?.shipment_id || null;
+
+    if (!shiprocketOrderId) {
+      throw new Error("Shiprocket order ID not found in response");
+    }
+
+    // Update orders table with Shiprocket details
+    await pool.query(
+      `UPDATE orders 
+       SET shiprocket_order_id = $1, 
+           shiprocket_shipment_id = $2,
+           courier_company_id = $3,
+           shipping_charge = $4,
+           shiprocket_sync_status = 'synced'
+       WHERE id = $5`,
+      [
+        shiprocketOrderId,
+        shiprocketShipmentId,
+        courierCompanyId || null,
+        shippingCharge,
+        orderId,
+      ],
+    );
+
+
+    return {
+      success: true,
+      shiprocket_order_id: shiprocketOrderId,
+      shiprocket_shipment_id: shiprocketShipmentId,
+    };
+  } catch (error) {
+    // Log the error but don't crash the checkout process (soft error)
+    console.error(
+      `[Shiprocket Sync] Failed to sync order ${orderId}:`,
+      error.message || error,
+    );
+
+    // Update order status to mark sync as failed (for manual tracking)
+    try {
+      await pool.query(
+        `UPDATE orders SET shiprocket_sync_status = 'failed' WHERE id = $1`,
+        [orderId],
+      );
+    } catch (updateError) {
+      console.error(`[Shiprocket Sync] Failed to update order status:`, updateError);
+    }
+
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+async function syncPaidOrderToShiprocket(orderId) {
+  const orderMetaResult = await pool.query(
+    `SELECT id, user_id, address_id, total_amount, payment_method, payment_status,
+            shipping_charge, courier_company_id, shiprocket_sync_status, shiprocket_order_id
+     FROM orders
+     WHERE id = $1`,
+    [orderId],
+  );
+
+  if (orderMetaResult.rows.length === 0) {
+    throw new Error("Order not found for Shiprocket sync");
+  }
+
+  const order = orderMetaResult.rows[0];
+
+  const alreadySynced =
+    order.shiprocket_sync_status === "synced" || Boolean(order.shiprocket_order_id);
+  if (alreadySynced) {
+    return { success: true, skipped: true, reason: "already_synced" };
+  }
+
+  const isCod = order.payment_method === "cod";
+  const isPaid = order.payment_status === "paid";
+
+  if (!isCod && !isPaid) {
+    return { success: true, skipped: true, reason: "payment_not_completed" };
+  }
+
+  return syncOrderToShiprocket({
+    orderId: order.id,
+    userId: order.user_id,
+    addressId: order.address_id,
+    items: [],
+    totalAmount: Number(order.total_amount || 0),
+    paymentMethod: order.payment_method,
+    shippingCharge: Number(order.shipping_charge || 0),
+    courierCompanyId: order.courier_company_id || null,
+  });
+}
+
 // Get available payment methods (public endpoint)
 router.get("/payment-methods", async (req, res) => {
   try {
@@ -604,13 +848,14 @@ router.post("/delivery-options", authenticateToken, async (req, res) => {
 });
 
 // POST /checkout/initiate
-// Body: { address_id, items: [{ product_id, quantity }], payment_gateway: "phonepe" }
+// Body: { address_id, items: [{ product_id, quantity }], payment_gateway: "phonepe", delivery_option_code, courier_company_id }
 router.post("/initiate", authenticateToken, async (req, res) => {
   const {
     address_id,
     items,
     payment_gateway = "phonepe",
     delivery_option_code,
+    courier_company_id,
   } = req.body;
 
   const normalizedItems = normalizeOrderItems(items);
@@ -719,7 +964,7 @@ router.post("/initiate", authenticateToken, async (req, res) => {
     const initialPaymentStatus = isCOD ? "pending" : "pending";
 
     const orderResult = await client.query(
-      "INSERT INTO orders (user_id, total_amount, payment_method, payment_status, status, address_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+      "INSERT INTO orders (user_id, total_amount, payment_method, payment_status, status, address_id, shipping_charge, courier_company_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
       [
         req.user.id,
         totalAmount,
@@ -727,6 +972,8 @@ router.post("/initiate", authenticateToken, async (req, res) => {
         initialPaymentStatus,
         isCOD ? "confirmed" : "pending",
         address_id,
+        selectedDeliveryCharge,
+        courier_company_id || null,
       ],
     );
 
@@ -758,6 +1005,16 @@ router.post("/initiate", authenticateToken, async (req, res) => {
     }
 
     await client.query("COMMIT");
+
+    // COD orders should be synced immediately. PhonePe orders are synced after payment success.
+    if (isCOD) {
+      syncPaidOrderToShiprocket(orderId).catch((syncError) => {
+        console.error(
+          "[Checkout] Shiprocket sync error (non-fatal):",
+          syncError.message,
+        );
+      });
+    }
 
     // Handle COD orders - no payment gateway needed
     if (isCOD) {
@@ -863,6 +1120,15 @@ router.post("/phonepe/callback", async (req, res) => {
 
     const updatedOrder = await updateOrderPaymentState(orderId, paymentStatus);
 
+    if (paymentStatus === "paid") {
+      syncPaidOrderToShiprocket(orderId).catch((syncError) => {
+        console.error(
+          "[Checkout] Shiprocket sync error after callback (non-fatal):",
+          syncError.message,
+        );
+      });
+    }
+
     return res.status(200).json({ message: "Callback processed" });
   } catch (error) {
     return res.status(500).json({ message: "Callback processing failed" });
@@ -906,6 +1172,15 @@ router.get("/status/:orderId", authenticateToken, async (req, res) => {
     const paymentStatus = mapPhonePeStateToPaymentStatus(state);
 
     const updatedOrder = await updateOrderPaymentState(orderId, paymentStatus);
+
+    if (paymentStatus === "paid") {
+      syncPaidOrderToShiprocket(orderId).catch((syncError) => {
+        console.error(
+          "[Checkout] Shiprocket sync error after status check (non-fatal):",
+          syncError.message,
+        );
+      });
+    }
 
     return res.json({
       order_id: orderId,

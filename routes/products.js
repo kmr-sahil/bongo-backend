@@ -100,7 +100,6 @@ router.get("/products", async (req, res) => {
 
     if (category) {
       categories = category.split(","); // ["books-magazines", "childrens-books-early-learning", ...]
-      console.log("Filtering by categories:", categories);
     }
 
     if (categories.length > 0) {

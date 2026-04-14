@@ -64,7 +64,6 @@ ${message}
 
 router.post("/newsletter", async (req, res) => {
   const { email } = req.body;
-
   // 🧪 Basic validation
   if (!email) {
     return res.status(400).json({

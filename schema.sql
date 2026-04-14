@@ -159,12 +159,19 @@ CREATE TABLE IF NOT EXISTS orders (
   payment_status payment_status NOT NULL DEFAULT 'pending',
   payment_method payment_method NOT NULL DEFAULT 'cod',
   address_id UUID NOT NULL REFERENCES addresses(id),
+  shiprocket_order_id BIGINT,
+  shiprocket_shipment_id BIGINT,
+  courier_company_id INT,
+  shipping_charge NUMERIC(10,2) DEFAULT 0,
+  shiprocket_sync_status VARCHAR(50) DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_shiprocket_order_id ON orders(shiprocket_order_id);
+CREATE INDEX IF NOT EXISTS idx_orders_shiprocket_sync_status ON orders(shiprocket_sync_status);
 
 -- ============================================================
 -- Order Items
