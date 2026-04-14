@@ -8,6 +8,31 @@ const { authenticateToken } = require("../helpers/middleware");
 
 const router = express.Router();
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  const normalized = normalizeEmail(email);
+
+  // Basic structure check: local@domain.tld
+  const basicPattern = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+  if (!basicPattern.test(normalized)) return false;
+
+  const [, domain = ""] = normalized.split("@");
+  const domainParts = domain.split(".");
+  if (domainParts.length < 2) return false;
+
+  const tld = domainParts[domainParts.length - 1];
+  const secondLevel = domainParts[domainParts.length - 2] || "";
+
+  // Reject suspicious domains like g.com / gk.com and weird TLDs.
+  if (secondLevel.length < 3) return false;
+  if (!/^[a-z]{2,6}$/.test(tld)) return false;
+
+  return true;
+}
+
 // Helper function to generate OTP (used only for forgot password)
 function generateOTP() {
   return crypto.randomInt(100000, 999999).toString();
@@ -18,10 +43,15 @@ function generateOTP() {
 // POST /api/auth/register
 //
 router.post("/register", async (req, res) => {
-  const { full_name, email, phone, password } = req.body;
+  const { full_name, phone, password } = req.body;
+  const email = normalizeEmail(req.body.email);
 
   if (!full_name || !email || !password) {
     return res.status(400).json({ message: "Required fields missing" });
+  }
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ message: "Please enter a valid email address" });
   }
 
   try {
@@ -67,7 +97,8 @@ router.post("/register", async (req, res) => {
 // POST /api/auth/login
 //
 router.post("/login", async (req, res) => {
-  const { email, password } = req.body;
+  const { password } = req.body;
+  const email = normalizeEmail(req.body.email);
 
   if (!email || !password) {
     return res.status(400).json({
@@ -227,10 +258,14 @@ router.put("/password", authenticateToken, async (req, res) => {
 // POST /api/auth/forgot-password
 //
 router.post("/forgot-password", async (req, res) => {
-  const { email } = req.body;
+  const email = normalizeEmail(req.body.email);
 
   if (!email) {
     return res.status(400).json({ message: "Email is required" });
+  }
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ message: "Please enter a valid email address" });
   }
 
   try {
@@ -250,10 +285,48 @@ router.post("/forgot-password", async (req, res) => {
       [otp, email]
     );
 
+    const otpText = [
+      "Bongo Hridoy - Password Reset OTP",
+      "",
+      `Your OTP is: ${otp}`,
+      "",
+      "Use this code to reset your password.",
+      "If you did not request this, please ignore this email.",
+    ].join("\n");
+
+    const otpHtml = `
+      <div style="font-family: Arial, sans-serif; background: #f6f7fb; padding: 24px; color: #1f2937;">
+        <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden;">
+          <div style="padding: 20px 24px; background: #111827; color: #ffffff;">
+            <h2 style="margin: 0; font-size: 20px;">Bongo Hridoy</h2>
+            <p style="margin: 8px 0 0; font-size: 13px; opacity: 0.9;">Password Reset Verification</p>
+          </div>
+
+          <div style="padding: 24px;">
+            <p style="margin: 0 0 12px; font-size: 14px;">We received a request to reset your password.</p>
+            <p style="margin: 0 0 16px; font-size: 14px;">Please use the following One-Time Password (OTP):</p>
+
+            <div style="display: inline-block; padding: 12px 20px; border-radius: 10px; background: #f3f4f6; border: 1px dashed #9ca3af; font-size: 28px; letter-spacing: 6px; font-weight: 700; color: #111827;">
+              ${otp}
+            </div>
+
+            <p style="margin: 18px 0 0; font-size: 13px; color: #6b7280;">
+              If you did not request this change, you can safely ignore this email.
+            </p>
+          </div>
+
+          <div style="padding: 14px 24px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #6b7280; background: #fafafa;">
+            This is an automated email from Bongo Hridoy. Please do not reply.
+          </div>
+        </div>
+      </div>
+    `;
+
     await sendMail({
       to: email,
       subject: "Password Reset OTP",
-      text: `Your OTP is: ${otp}`,
+      text: otpText,
+      html: otpHtml,
     });
 
     res.json({ message: "OTP sent to email" });
@@ -269,7 +342,8 @@ router.post("/forgot-password", async (req, res) => {
 // POST /api/auth/reset-password
 //
 router.post("/reset-password", async (req, res) => {
-  const { email, otp, newPassword } = req.body;
+  const { otp, newPassword } = req.body;
+  const email = normalizeEmail(req.body.email);
 
   if (!email || !otp || !newPassword) {
     return res.status(400).json({ message: "All fields are required" });

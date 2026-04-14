@@ -4,6 +4,14 @@ const pool = require("../db");
 
 const router = express.Router();
 
+const VALID_PAYMENT_METHODS = new Set(["cod", "upi", "card", "netbanking", "wallet"]);
+
+const parsePositiveInteger = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) return null;
+  return parsed;
+};
+
 // ============================================================
 // Wishlist Routes
 // ============================================================
@@ -15,6 +23,7 @@ router.get("/wishlist", authenticateToken, async (req, res) => {
       `
       SELECT 
         w.id,
+        w.product_id,
         w.created_at,
 
         json_build_object(
@@ -98,6 +107,14 @@ router.post("/wishlist", authenticateToken, async (req, res) => {
 router.delete("/wishlist/:productId", authenticateToken, async (req, res) => {
   const { productId } = req.params;
 
+  if (!productId || productId === "undefined") {
+    return res.status(400).json({ message: "Product ID is required" });
+  }
+
+  if (!/^[0-9a-fA-F-]{36}$/.test(productId)) {
+    return res.status(400).json({ message: "Invalid Product ID" });
+  }
+
   try {
     const result = await pool.query(
       "DELETE FROM wishlists WHERE user_id = $1 AND product_id = $2 RETURNING id",
@@ -116,28 +133,28 @@ router.delete("/wishlist/:productId", authenticateToken, async (req, res) => {
 });
 
 // ============================================================
-// Cart Routes (Assuming a cart table exists; if not, implement session-based)
+// Cart Routes
 // ============================================================
-
-// Note: Since there's no cart table in schema.sql, these routes assume a cart table with columns: id, user_id, product_id, quantity, created_at
-// If cart is session-based, modify accordingly.
 
 // GET /cart - Get user's cart
 router.get("/cart", authenticateToken, async (req, res) => {
   try {
     const cart = await pool.query(
       `
-      SELECT c.id, c.quantity, c.created_at,
+      SELECT ct.id, ct.quantity, ct.created_at,
              p.id as product_id, p.name, p.slug, p.price, p.sale_price, p.stock,
-             c.name as category_name, c.slug as category_slug,
-             array_agg(pi.image_url ORDER BY pi.sort_order) as images
-      FROM cart c
-      JOIN products p ON c.product_id = p.id
-      LEFT JOIN categories c ON p.category_id = c.id
+             cat.name as category_name, cat.slug as category_slug,
+             COALESCE(
+               array_agg(pi.image_url ORDER BY pi.sort_order) FILTER (WHERE pi.id IS NOT NULL),
+               '{}'
+             ) as images
+      FROM cart ct
+      JOIN products p ON ct.product_id = p.id
+      LEFT JOIN categories cat ON p.category_id = cat.id
       LEFT JOIN product_images pi ON p.id = pi.product_id
-      WHERE c.user_id = $1
-      GROUP BY c.id, p.id, c.name, c.slug
-      ORDER BY c.created_at DESC
+      WHERE ct.user_id = $1
+      GROUP BY ct.id, p.id, cat.name, cat.slug
+      ORDER BY ct.created_at DESC
       `,
       [req.user.id],
     );
@@ -150,22 +167,28 @@ router.get("/cart", authenticateToken, async (req, res) => {
 
 // POST /cart - Add product to cart
 router.post("/cart", authenticateToken, async (req, res) => {
-  const { product_id, quantity = 1 } = req.body;
+  const { product_id } = req.body;
+  const quantity = parsePositiveInteger(req.body.quantity ?? 1);
 
   if (!product_id) {
     return res.status(400).json({ message: "Product ID is required" });
+  }
+  if (!quantity) {
+    return res.status(400).json({ message: "Valid quantity is required" });
   }
 
   try {
     // Check if product exists and has stock
     const product = await pool.query(
-      "SELECT id, stock FROM products WHERE id = $1",
+      "SELECT id, price, sale_price, stock FROM products WHERE id = $1",
       [product_id],
     );
     if (product.rows.length === 0) {
       return res.status(404).json({ message: "Product not found" });
     }
-    if (product.rows[0].stock < quantity) {
+    const productRow = product.rows[0];
+
+    if (productRow.stock < quantity) {
       return res.status(400).json({ message: "Insufficient stock" });
     }
 
@@ -177,16 +200,22 @@ router.post("/cart", authenticateToken, async (req, res) => {
     if (existing.rows.length > 0) {
       // Update quantity
       const newQuantity = existing.rows[0].quantity + quantity;
+      if (productRow.stock < newQuantity) {
+        return res.status(400).json({ message: "Insufficient stock" });
+      }
+
       const updated = await pool.query(
-        "UPDATE cart SET quantity = $1 WHERE id = $2 RETURNING id, quantity",
+        "UPDATE cart SET quantity = $1, updated_at = NOW() WHERE id = $2 RETURNING id, quantity, updated_at",
         [newQuantity, existing.rows[0].id],
       );
       return res.json(updated.rows[0]);
     }
 
+    const effectivePrice = productRow.sale_price ?? productRow.price;
+
     const newCartItem = await pool.query(
-      "INSERT INTO cart (user_id, product_id, quantity) VALUES ($1, $2, $3) RETURNING id, quantity, created_at",
-      [req.user.id, product_id, quantity],
+      "INSERT INTO cart (user_id, product_id, quantity, original_price, price) VALUES ($1, $2, $3, $4, $5) RETURNING id, quantity, original_price, price, created_at",
+      [req.user.id, product_id, quantity, productRow.price, effectivePrice],
     );
 
     res.status(201).json(newCartItem.rows[0]);
@@ -199,15 +228,26 @@ router.post("/cart", authenticateToken, async (req, res) => {
 // PUT /cart/:productId - Update cart item quantity
 router.put("/cart/:productId", authenticateToken, async (req, res) => {
   const { productId } = req.params;
-  const { quantity } = req.body;
+  const quantity = parsePositiveInteger(req.body.quantity);
 
-  if (!quantity || quantity < 1) {
+  if (!quantity) {
     return res.status(400).json({ message: "Valid quantity is required" });
   }
 
   try {
+    const product = await pool.query("SELECT stock FROM products WHERE id = $1", [
+      productId,
+    ]);
+
+    if (product.rows.length === 0) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    if (product.rows[0].stock < quantity) {
+      return res.status(400).json({ message: "Insufficient stock" });
+    }
+
     const updated = await pool.query(
-      "UPDATE cart SET quantity = $1 WHERE user_id = $2 AND product_id = $3 RETURNING id, quantity",
+      "UPDATE cart SET quantity = $1, updated_at = NOW() WHERE user_id = $2 AND product_id = $3 RETURNING id, quantity, updated_at",
       [quantity, req.user.id, productId],
     );
 
@@ -310,78 +350,118 @@ router.get("/orders", authenticateToken, async (req, res) => {
 router.post("/orders", authenticateToken, async (req, res) => {
   const { address_id, payment_method = "cod", items } = req.body;
 
-  if (!address_id || !items || items.length === 0) {
+  if (!address_id || !Array.isArray(items) || items.length === 0) {
     return res
       .status(400)
       .json({ message: "Address ID and items are required" });
   }
+  if (!VALID_PAYMENT_METHODS.has(payment_method)) {
+    return res.status(400).json({ message: "Invalid payment method" });
+  }
+
+  const normalizedItems = items.map((item) => ({
+    product_id: item?.product_id,
+    quantity: parsePositiveInteger(item?.quantity),
+  }));
+
+  if (
+    normalizedItems.some(
+      (item) => !item.product_id || !item.quantity,
+    )
+  ) {
+    return res.status(400).json({ message: "Each item needs product_id and valid quantity" });
+  }
+
+  const client = await pool.connect();
 
   try {
+    await client.query("BEGIN");
+
     // Verify address belongs to user
-    const address = await pool.query(
+    const address = await client.query(
       "SELECT id FROM addresses WHERE id = $1 AND user_id = $2",
       [address_id, req.user.id],
     );
     if (address.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ message: "Invalid address" });
     }
 
-    // Calculate total and verify items
+    // Calculate total and verify items while locking product rows for stock safety
     let totalAmount = 0;
-    for (const item of items) {
-      const product = await pool.query(
-        "SELECT price, stock FROM products WHERE id = $1",
+    const itemSnapshots = [];
+
+    for (const item of normalizedItems) {
+      const product = await client.query(
+        "SELECT id, name, price, stock FROM products WHERE id = $1 FOR UPDATE",
         [item.product_id],
       );
       if (product.rows.length === 0) {
+        await client.query("ROLLBACK");
         return res
           .status(400)
           .json({ message: `Product ${item.product_id} not found` });
       }
       if (product.rows[0].stock < item.quantity) {
+        await client.query("ROLLBACK");
         return res.status(400).json({
           message: `Insufficient stock for product ${item.product_id}`,
         });
       }
+
       totalAmount += product.rows[0].price * item.quantity;
+      itemSnapshots.push({
+        product_id: product.rows[0].id,
+        quantity: item.quantity,
+        price: product.rows[0].price,
+        name: product.rows[0].name,
+      });
     }
 
     // Create order
-    const newOrder = await pool.query(
+    const newOrder = await client.query(
       "INSERT INTO orders (user_id, total_amount, payment_method, address_id) VALUES ($1, $2, $3, $4) RETURNING id",
       [req.user.id, totalAmount, payment_method, address_id],
     );
 
     // Add order items
-    for (const item of items) {
-      const product = await pool.query(
-        "SELECT name, price FROM products WHERE id = $1",
-        [item.product_id],
-      );
-      await pool.query(
+    for (const item of itemSnapshots) {
+      await client.query(
         "INSERT INTO order_items (order_id, product_id, quantity, price_snapshot, product_name_snapshot) VALUES ($1, $2, $3, $4, $5)",
         [
           newOrder.rows[0].id,
           item.product_id,
           item.quantity,
-          product.rows[0].price,
-          product.rows[0].name,
+          item.price,
+          item.name,
         ],
       );
+
       // Update stock
-      await pool.query("UPDATE products SET stock = stock - $1 WHERE id = $2", [
+      await client.query("UPDATE products SET stock = stock - $1 WHERE id = $2", [
         item.quantity,
         item.product_id,
       ]);
+
+      // Cleanup successfully purchased item from cart for this user
+      await client.query(
+        "DELETE FROM cart WHERE user_id = $1 AND product_id = $2",
+        [req.user.id, item.product_id],
+      );
     }
+
+    await client.query("COMMIT");
 
     res.status(201).json({
       message: "Order created successfully",
       order_id: newOrder.rows[0].id,
     });
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error(error);
     res.status(500).json({ message: "Server error" });
+  } finally {
+    client.release();
   }
 });
 

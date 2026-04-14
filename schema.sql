@@ -159,12 +159,19 @@ CREATE TABLE IF NOT EXISTS orders (
   payment_status payment_status NOT NULL DEFAULT 'pending',
   payment_method payment_method NOT NULL DEFAULT 'cod',
   address_id UUID NOT NULL REFERENCES addresses(id),
+  shiprocket_order_id BIGINT,
+  shiprocket_shipment_id BIGINT,
+  courier_company_id INT,
+  shipping_charge NUMERIC(10,2) DEFAULT 0,
+  shiprocket_sync_status VARCHAR(50) DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_shiprocket_order_id ON orders(shiprocket_order_id);
+CREATE INDEX IF NOT EXISTS idx_orders_shiprocket_sync_status ON orders(shiprocket_sync_status);
 
 -- ============================================================
 -- Order Items
@@ -298,3 +305,63 @@ CREATE TABLE newsletters (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS cart (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  quantity INT NOT NULL,
+  original_price NUMERIC(10,2) NOT NULL,
+  price NUMERIC(10,2) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cart_user_id ON cart(user_id);
+CREATE INDEX IF NOT EXISTS idx_cart_updated_at ON cart(updated_at);
+
+CREATE TABLE IF NOT EXISTS cart_abandon_reminders (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  last_cart_activity_at TIMESTAMPTZ NOT NULL,
+  last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cart_abandon_reminders_last_sent_at ON cart_abandon_reminders(last_sent_at);
+
+DROP TRIGGER IF EXISTS update_cart_abandon_reminders_updated_at ON cart_abandon_reminders;
+CREATE TRIGGER update_cart_abandon_reminders_updated_at
+BEFORE UPDATE ON cart_abandon_reminders
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+
+CREATE TABLE IF NOT EXISTS available_payment_method(
+  id SERIAL PRIMARY KEY,
+  payment_method VARCHAR(50) NOT NULL UNIQUE,
+  is_available BOOLEAN DEFAULT true,
+  notes TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Insert default payment methods
+INSERT INTO available_payment_method (payment_method, is_available, notes) VALUES
+  ('cash_on_delivery', true, 'Pay when you receive your order'),
+  ('phonepe', true, 'Continue With Phone Pay for UPI, Net Banking & Credit/Debit Card')
+ON CONFLICT (payment_method) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS shiprocket_key(
+  id INT PRIMARY KEY DEFAULT 1,
+  shiprocket_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT single_row_only CHECK (id = 1)
+);
+
+DROP TRIGGER IF EXISTS update_shiprocket_key_updated_at ON shiprocket_key;
+CREATE TRIGGER update_shiprocket_key_updated_at
+BEFORE UPDATE ON shiprocket_key
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();

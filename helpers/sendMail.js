@@ -19,8 +19,10 @@ const transporter = nodemailer.createTransport({
  */
 async function sendMail({ to, subject, text, html }) {
   try {
-    return true; // TEMP: Skip actual sending for now
-    
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+      throw new Error("EMAIL_USER and EMAIL_PASS must be configured");
+    }
+
     const info = await transporter.sendMail({
       from: process.env.EMAIL_USER,
       to,
@@ -29,7 +31,6 @@ async function sendMail({ to, subject, text, html }) {
       html,
     });
 
-    console.log("📨 Mail sent:", info.response);
     return true;
   } catch (error) {
     console.error("❌ Mail error:", error);

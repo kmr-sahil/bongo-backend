@@ -19,6 +19,9 @@ const ordersRouter = require("./routes/cart");
 const adminRouter = require("./routes/admin");
 const blogsRouter = require("./routes/blogs");
 const extras = require("./routes/extras");
+const checkoutRouter = require("./routes/checkout");
+require("./Schedulers/abadonCardScheduler");
+require("./Schedulers/pendingPhonePeOrderScheduler");
 
 app.use("/api/auth", authRouter);
 app.use("/profile", profileRouter);
@@ -28,6 +31,7 @@ app.use("/store", ordersRouter);
 app.use("/store/admin", adminRouter);
 app.use("/blogs", blogsRouter);
 app.use("/extras", extras);
+app.use("/checkout", checkoutRouter);
 
 app.get("/", (req, res) => {
   res.send("Server is running");
